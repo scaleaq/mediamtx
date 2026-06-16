@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"sync/atomic"
 	"time"
 
 	"github.com/bluenviron/gortsplib/v5"
@@ -83,8 +82,6 @@ type Source struct {
 	WriteQueueSize    int
 	UDPReadBufferSize uint
 	Parent            parent
-	// client is accessed concurrently by Run (writer) and SourceStats (reader) so it is atomic.
-	client atomic.Pointer[gortsplib.Client]
 }
 
 // Log implements logger.Writer.
@@ -157,12 +154,6 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 			decodeErrors.Add(err)
 		},
 	}
-
-	s.client.Store(c)
-
-	// Clear the client on exit so that, across a disconnect/retry cycle,
-	// SourceStats() reports nil instead of stale values from the previous, closed connection.
-	defer func() { s.client.Store(nil) }()
 
 	switch u0.Scheme {
 	case "rtsp+http", "rtsps+http":
@@ -322,31 +313,5 @@ func (*Source) APISourceDescribe() *defs.APIPathSource {
 	return &defs.APIPathSource{
 		Type: defs.APIPathSourceTypeRTSPSource,
 		ID:   "",
-	}
-}
-
-var _ defs.StaticSourceStatsProvider = (*Source)(nil)
-
-// SourceStats method exports RTSP Client source statistiscs
-func (s *Source) SourceStats() defs.StaticSourceStats {
-	c := s.client.Load()
-	if c == nil {
-		return nil
-	}
-	cs := c.Stats()
-
-	if cs == nil {
-		return nil
-	}
-
-	jitter := cs.Session.InboundRTPPacketsJitter
-
-	return &defs.RTSPSourceStats{
-		BaseSourceStats: defs.BaseSourceStats{
-			PacketsReceived: cs.Session.InboundRTPPackets,
-			PacketsLost:     cs.Session.InboundRTPPacketsLost,
-			Jitter:          &jitter,
-		},
-		PacketsInError: cs.Session.InboundRTPPacketsInError,
 	}
 }
