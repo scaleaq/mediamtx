@@ -166,7 +166,7 @@ func (s *Server) Initialize() error {
 			return err
 		}
 
-		s.srv.TLSConfig = &tls.Config{GetCertificate: s.loader.GetCertificate()}
+		s.srv.TLSConfig = &tls.Config{GetCertificate: s.loader.GetCertificate}
 	}
 
 	s.srv.Listen = func(network, address string) (net.Listener, error) {
@@ -299,6 +299,8 @@ func (s *Server) Close() {
 	if s.loader != nil {
 		s.loader.Close()
 	}
+
+	s.Log(logger.Debug, "closed")
 }
 
 func (s *Server) run() {
@@ -581,16 +583,16 @@ func (s *Server) APISessionsKick(uuid uuid.UUID) error {
 	default:
 	}
 
-	s.mutex.RLock()
-	defer s.mutex.RUnlock()
-
+	s.mutex.Lock()
 	key, sx := s.findSessionByUUID(uuid)
 	if sx == nil {
+		s.mutex.Unlock()
 		return ErrSessionNotFound
 	}
+	delete(s.sessions, key)
+	s.mutex.Unlock()
 
 	sx.Close()
-	delete(s.sessions, key)
 	sx.onClose(liberrors.ErrServerTerminated{})
 	return nil
 }

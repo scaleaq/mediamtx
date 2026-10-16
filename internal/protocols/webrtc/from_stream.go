@@ -16,18 +16,29 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/format/rtpvp8"
 	"github.com/bluenviron/gortsplib/v5/pkg/format/rtpvp9"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/g711"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/opus"
+	"github.com/pion/rtp"
+	"github.com/pion/webrtc/v4"
+
 	"github.com/bluenviron/mediamtx/internal/formatlabel"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/stream"
 	"github.com/bluenviron/mediamtx/internal/unit"
-	"github.com/pion/rtp"
-	"github.com/pion/webrtc/v4"
 )
 
 const (
-	webrtcPayloadMaxSize = 1188 // 1200 - 12 (RTP header)
+	webrtcPayloadMaxSize    = 1188 // 1200 - 12 (RTP header)
+	audioPTSDriftTolerance  = 500 * time.Millisecond
+	seiUserDataUnregistered = 5
 )
+
+var djiSEIUserDataUnregisteredUUID = [16]byte{
+	0x81, 0x6d, 0x38, 0x4e,
+	0x99, 0x8c, 0x11, 0xea,
+	0xb2, 0x94, 0x02, 0xfc,
+	0xdc, 0x4e, 0x74, 0x12,
+}
 
 var multichannelOpusSDP = map[int]string{
 	3: "channel_mapping=0,2,1;num_streams=2;coupled_streams=1",
@@ -59,6 +70,85 @@ func multiplyAndDivide2(v, m, d time.Duration) time.Duration {
 
 func timestampToDuration(t int64, clockRate int) time.Duration {
 	return multiplyAndDivide2(time.Duration(t), time.Second, time.Duration(clockRate))
+}
+
+func ptsDriftExceeded(pts uint32, firstPTS uint32, tolerance uint32) bool {
+	delta := int32(pts - firstPTS)
+	return delta > int32(tolerance) || delta < -int32(tolerance)
+}
+
+func h264SEIHasUserDataUnregisteredUUID(nalu []byte, target [16]byte) bool {
+	pos := 1
+	zeroCount := 0
+
+	readByte := func() (byte, bool) {
+		for pos < len(nalu) {
+			b := nalu[pos]
+			pos++
+
+			if zeroCount >= 2 && b == 0x03 {
+				zeroCount = 0
+				continue
+			}
+
+			if b == 0x00 {
+				zeroCount++
+			} else {
+				zeroCount = 0
+			}
+
+			return b, true
+		}
+
+		return 0, false
+	}
+
+	for {
+		payloadType := 0
+		for {
+			b, ok := readByte()
+			if !ok {
+				return false
+			}
+			payloadType += int(b)
+			if b != 0xff {
+				break
+			}
+		}
+
+		payloadSize := 0
+		for {
+			b, ok := readByte()
+			if !ok {
+				return false
+			}
+			payloadSize += int(b)
+			if b != 0xff {
+				break
+			}
+		}
+
+		if payloadType == seiUserDataUnregistered && payloadSize >= len(target) {
+			matches := true
+			for _, expected := range target {
+				actual, ok := readByte()
+				if !ok {
+					return false
+				}
+				matches = matches && actual == expected
+			}
+			if matches {
+				return true
+			}
+			payloadSize -= len(target)
+		}
+
+		for range payloadSize {
+			if _, ok := readByte(); !ok {
+				return false
+			}
+		}
+	}
 }
 
 func setupVideoTrack(
@@ -298,7 +388,22 @@ func setupVideoTrack(
 				}
 				lastPTS = u.PTS
 
-				packets, err2 := encoder.Encode(u.Payload.(unit.PayloadH264))
+				// filter out SEI NALUs with DJI user data that cause browser decoding to get stuck.
+				// https://github.com/bluenviron/mediamtx/issues/5221
+				au := u.Payload.(unit.PayloadH264)
+				filteredAU := make(unit.PayloadH264, 0, len(au))
+				for _, nalu := range au {
+					if h264.NALUType(nalu[0]&0x1F) != h264.NALUTypeSEI ||
+						!h264SEIHasUserDataUnregisteredUUID(nalu, djiSEIUserDataUnregisteredUUID) {
+						filteredAU = append(filteredAU, nalu)
+					}
+				}
+
+				if len(filteredAU) == 0 {
+					return nil
+				}
+
+				packets, err2 := encoder.Encode(filteredAU)
 				if err2 != nil {
 					return nil //nolint:nilerr
 				}
@@ -359,16 +464,28 @@ func setupAudioTrack(
 			Caps: caps,
 		}
 
-		curTimestamp, err := randUint32()
-		if err != nil {
-			return nil, err
-		}
+		var pts uint32
+		ptsInitialized := false
+		ptsTolerance := uint32(multiplyAndDivide2(
+			audioPTSDriftTolerance,
+			time.Duration(opusFormat.ClockRate()),
+			time.Second,
+		))
 
 		r.OnData(
 			media,
 			opusFormat,
 			func(u *unit.Unit) error {
-				baseTimestamp := curTimestamp
+				// recompute timestamp from scratch.
+				// Chrome requires a precise timestamp that FFmpeg doesn't provide.
+				// also reset in case of drifts.
+				firstPTS := u.RTPPackets[0].Timestamp
+				if !ptsInitialized || ptsDriftExceeded(pts, firstPTS, ptsTolerance) {
+					pts = firstPTS
+					ptsInitialized = true
+				}
+
+				baseTimestamp := pts
 
 				for _, orig := range u.RTPPackets {
 					// create a copy of the packet that we can edit freely
@@ -377,13 +494,12 @@ func setupAudioTrack(
 						Payload: orig.Payload,
 					}
 
-					// recompute timestamp from scratch.
-					// Chrome requires a precise timestamp that FFmpeg doesn't provide.
-					pkt.Timestamp = curTimestamp
-					curTimestamp += uint32(opus.PacketDuration2(pkt.Payload))
+					pkt.Timestamp = pts
 
 					ntp := u.NTP.Add(timestampToDuration(int64(pkt.Timestamp-baseTimestamp), 48000))
 					track.WriteRTPWithNTP(pkt, ntp) //nolint:errcheck
+
+					pts += uint32(opus.PacketDuration2(pkt.Payload))
 				}
 
 				return nil
@@ -407,7 +523,13 @@ func setupAudioTrack(
 			media,
 			g722Format,
 			func(u *unit.Unit) error {
-				for _, pkt := range u.RTPPackets {
+				for _, orig := range u.RTPPackets {
+					// create a copy of the packet that we can edit freely
+					pkt := &rtp.Packet{
+						Header:  orig.Header,
+						Payload: orig.Payload,
+					}
+
 					ntp := u.NTP.Add(timestampToDuration(int64(pkt.Timestamp-u.RTPPackets[0].Timestamp), 8000))
 					track.WriteRTPWithNTP(pkt, ntp) //nolint:errcheck
 				}
@@ -476,16 +598,28 @@ func setupAudioTrack(
 		}
 
 		if g711Format.ClockRate() == 8000 {
-			curTimestamp, err := randUint32()
-			if err != nil {
-				return nil, err
-			}
+			var pts uint32
+			ptsInitialized := false
+			ptsTolerance := uint32(multiplyAndDivide2(
+				audioPTSDriftTolerance,
+				time.Duration(g711Format.ClockRate()),
+				time.Second,
+			))
 
 			r.OnData(
 				media,
 				g711Format,
 				func(u *unit.Unit) error {
-					baseTimestamp := curTimestamp
+					// recompute timestamp from scratch.
+					// Chrome requires a precise timestamp that FFmpeg doesn't provide.
+					// also reset in case of drifts.
+					firstPTS := u.RTPPackets[0].Timestamp
+					if !ptsInitialized || ptsDriftExceeded(pts, firstPTS, ptsTolerance) {
+						pts = firstPTS
+						ptsInitialized = true
+					}
+
+					baseTimestamp := pts
 
 					for _, orig := range u.RTPPackets {
 						// create a copy of the packet that we can edit freely
@@ -494,13 +628,12 @@ func setupAudioTrack(
 							Payload: orig.Payload,
 						}
 
-						// recompute timestamp from scratch.
-						// Chrome requires a precise timestamp that FFmpeg doesn't provide.
-						pkt.Timestamp = curTimestamp
-						curTimestamp += uint32(len(pkt.Payload)) / uint32(g711Format.ChannelCount)
+						pkt.Timestamp = pts
 
 						ntp := u.NTP.Add(timestampToDuration(int64(pkt.Timestamp-baseTimestamp), 8000))
 						track.WriteRTPWithNTP(pkt, ntp) //nolint:errcheck
+
+						pts += uint32(len(pkt.Payload)) / uint32(g711Format.ChannelCount)
 					}
 
 					return nil
@@ -517,10 +650,13 @@ func setupAudioTrack(
 				return nil, err
 			}
 
-			curTimestamp, err := randUint32()
-			if err != nil {
-				return nil, err
-			}
+			var pts uint32
+			ptsInitialized := false
+			ptsTolerance := uint32(multiplyAndDivide2(
+				audioPTSDriftTolerance,
+				time.Duration(g711Format.ClockRate()),
+				time.Second,
+			))
 
 			r.OnData(
 				media,
@@ -546,16 +682,24 @@ func setupAudioTrack(
 						return nil //nolint:nilerr
 					}
 
-					baseTimestamp := curTimestamp
+					// recompute timestamp from scratch.
+					// Chrome requires a precise timestamp that FFmpeg doesn't provide.
+					// also reset in case of drifts.
+					firstPTS := u.RTPPackets[0].Timestamp
+					if !ptsInitialized || ptsDriftExceeded(pts, firstPTS, ptsTolerance) {
+						pts = firstPTS
+						ptsInitialized = true
+					}
+
+					baseTimestamp := pts
 
 					for _, pkt := range packets {
-						// recompute timestamp from scratch.
-						// Chrome requires a precise timestamp that FFmpeg doesn't provide.
-						pkt.Timestamp = curTimestamp
-						curTimestamp += uint32(len(pkt.Payload)) / 2 / uint32(g711Format.ChannelCount)
+						pkt.Timestamp = pts
 
 						ntp := u.NTP.Add(timestampToDuration(int64(pkt.Timestamp-baseTimestamp), g711Format.ClockRate()))
 						track.WriteRTPWithNTP(pkt, ntp) //nolint:errcheck
+
+						pts += uint32(len(pkt.Payload)) / 2 / uint32(g711Format.ChannelCount)
 					}
 
 					return nil
@@ -603,10 +747,13 @@ func setupAudioTrack(
 			return nil, err
 		}
 
-		curTimestamp, err := randUint32()
-		if err != nil {
-			return nil, err
-		}
+		var pts uint32
+		ptsInitialized := false
+		ptsTolerance := uint32(multiplyAndDivide2(
+			audioPTSDriftTolerance,
+			time.Duration(lpcmFormat.ClockRate()),
+			time.Second,
+		))
 
 		r.OnData(
 			media,
@@ -621,16 +768,24 @@ func setupAudioTrack(
 					return nil //nolint:nilerr
 				}
 
-				baseTimestamp := curTimestamp
+				// recompute timestamp from scratch.
+				// Chrome requires a precise timestamp that FFmpeg doesn't provide.
+				// also reset in case of drifts.
+				firstPTS := u.RTPPackets[0].Timestamp
+				if !ptsInitialized || ptsDriftExceeded(pts, firstPTS, ptsTolerance) {
+					pts = firstPTS
+					ptsInitialized = true
+				}
+
+				baseTimestamp := pts
 
 				for _, pkt := range packets {
-					// recompute timestamp from scratch.
-					// Chrome requires a precise timestamp that FFmpeg doesn't provide.
-					pkt.Timestamp = curTimestamp
-					curTimestamp += uint32(len(pkt.Payload)) / 2 / uint32(lpcmFormat.ChannelCount)
+					pkt.Timestamp = pts
 
 					ntp := u.NTP.Add(timestampToDuration(int64(pkt.Timestamp-baseTimestamp), lpcmFormat.ClockRate()))
 					track.WriteRTPWithNTP(pkt, ntp) //nolint:errcheck
+
+					pts += uint32(len(pkt.Payload)) / 2 / uint32(lpcmFormat.ChannelCount)
 				}
 
 				return nil

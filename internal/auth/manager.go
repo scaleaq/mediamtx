@@ -14,10 +14,13 @@ import (
 	"time"
 
 	"github.com/MicahParks/keyfunc/v3"
-	"github.com/bluenviron/mediamtx/internal/conf"
-	"github.com/bluenviron/mediamtx/internal/protocols/tls"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+
+	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/logger"
+	"github.com/bluenviron/mediamtx/internal/protocols/httpp"
+	"github.com/bluenviron/mediamtx/internal/protocols/tls"
 )
 
 const (
@@ -103,10 +106,19 @@ type Manager struct {
 	JWTIssuer          string
 	JWTAudience        string
 	ReadTimeout        time.Duration
+	Parent             logger.Writer
 
+	wrapTransport   func(http.RoundTripper) http.RoundTripper
 	mutex           sync.RWMutex
 	jwksLastRefresh time.Time
 	jwtKeyFunc      keyfunc.Keyfunc
+}
+
+// Initialize initializes the manager.
+func (m *Manager) Initialize() {
+	m.wrapTransport = func(tr http.RoundTripper) http.RoundTripper {
+		return &httpp.LoggerTransport{Transport: tr, Log: m.Parent}
+	}
 }
 
 // ReloadInternalUsers reloads InternalUsers.
@@ -141,7 +153,7 @@ func (m *Manager) Authenticate(req *Request) (string, *Error) {
 	if err != nil {
 		return "", &Error{
 			Wrapped:        err,
-			AskCredentials: (req.Credentials.User == "" && req.Credentials.Pass == "" && token == ""),
+			AskCredentials: req.EnableAskCredentials && req.Credentials.User == "" && req.Credentials.Pass == "" && token == "",
 		}
 	}
 
@@ -224,7 +236,7 @@ func (m *Manager) authenticateHTTP(req *Request, token string) (string, error) {
 
 	httpClient := &http.Client{
 		Timeout:   m.ReadTimeout,
-		Transport: tr,
+		Transport: m.wrapTransport(tr),
 	}
 
 	res, err := httpClient.Post(m.HTTPAddress, "application/json", bytes.NewReader(enc))
@@ -250,13 +262,13 @@ func (m *Manager) authenticateJWT(req *Request, token string) (string, error) {
 		return "", nil
 	}
 
+	if token == "" {
+		return "", fmt.Errorf("JWT not provided")
+	}
+
 	keyfunc, err := m.pullJWTJWKS()
 	if err != nil {
 		return "", err
-	}
-
-	if token == "" {
-		return "", fmt.Errorf("JWT not provided")
 	}
 
 	var opts []jwt.ParserOption
@@ -294,8 +306,8 @@ func (m *Manager) pullJWTJWKS() (jwt.Keyfunc, error) {
 		defer tr.CloseIdleConnections()
 
 		httpClient := &http.Client{
-			Timeout:   (m.ReadTimeout),
-			Transport: tr,
+			Timeout:   m.ReadTimeout,
+			Transport: m.wrapTransport(tr),
 		}
 
 		res, err := httpClient.Get(m.JWTJWKS)
@@ -303,6 +315,10 @@ func (m *Manager) pullJWTJWKS() (jwt.Keyfunc, error) {
 			return nil, err
 		}
 		defer res.Body.Close()
+
+		if res.StatusCode < 200 || res.StatusCode > 299 {
+			return nil, fmt.Errorf("JWKS server replied with code %d", res.StatusCode)
+		}
 
 		var raw json.RawMessage
 		err = json.NewDecoder(&customLimitReader{res.Body, maxInboundBodySize}).Decode(&raw)

@@ -1,4 +1,4 @@
-# Record
+# Record streams
 
 Live streams be recorded to disk and played back with the following file containers and codecs:
 
@@ -27,7 +27,7 @@ pathDefaults:
   # Extension is added automatically.
   # Available variables are %path (path name), %Y %m %d (year, month, day),
   # %H %M %S (hours, minutes, seconds), %f (microseconds), %z (time zone), %s (unix epoch).
-  recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+  recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f_%z
   # Format of recorded segments.
   # Available formats are "fmp4" (fragmented MP4) and "mpegts" (MPEG-TS).
   recordFormat: fmp4

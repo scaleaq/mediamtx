@@ -9,6 +9,7 @@ import (
 
 	"github.com/bluenviron/gortsplib/v5/pkg/multicast"
 	"github.com/bluenviron/gortsplib/v5/pkg/readbuffer"
+
 	"github.com/bluenviron/mediamtx/internal/restrictnetwork"
 )
 
@@ -136,6 +137,10 @@ func (l *Listener) Read(p []byte) (int, error) {
 		n, addr, err := l.pc.ReadFrom(p)
 
 		if l.sourceIP != nil && addr != nil && !addr.(*net.UDPAddr).IP.Equal(l.sourceIP) {
+			continue
+		}
+
+		if n == 0 && err == nil {
 			continue
 		}
 

@@ -16,7 +16,7 @@ import (
 	"github.com/pion/ice/v4"
 	"github.com/pion/interceptor"
 	"github.com/pion/sdp/v3"
-	"github.com/pion/transport/v4"
+	"github.com/pion/transport/v5"
 	"github.com/pion/webrtc/v4"
 
 	"github.com/bluenviron/mediamtx/internal/logger"
@@ -27,7 +27,7 @@ const (
 	twccExtensionURI = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
 )
 
-func interfaceIPs(interfaceList []string) ([]string, error) {
+func interfaceIPs(interfaceList []string, excludeList []string) ([]string, error) {
 	intfs, err := net.Interfaces()
 	if err != nil {
 		return nil, err
@@ -36,6 +36,9 @@ func interfaceIPs(interfaceList []string) ([]string, error) {
 	var ips []string
 
 	for _, intf := range intfs {
+		if slices.Contains(excludeList, intf.Name) {
+			continue
+		}
 		if len(interfaceList) == 0 || slices.Contains(interfaceList, intf.Name) {
 			var addrs []net.Addr
 			addrs, err = intf.Addrs()
@@ -78,6 +81,25 @@ func maxTrackCount(medias []*sdp.MediaDescription) int {
 		total += ridCount
 	}
 	return total
+}
+
+func ridIndexByMedia(media *sdp.MediaDescription) map[string]int {
+	ret := make(map[string]int)
+
+	for _, attr := range media.Attributes {
+		if attr.Key != "rid" || attr.Value == "" {
+			continue
+		}
+
+		ridge, _, ok := strings.Cut(attr.Value, " ")
+		if !ok || ridge == "" {
+			ridge = attr.Value
+		}
+
+		ret[ridge] = len(ret)
+	}
+
+	return ret
 }
 
 // * skip ConfigureRTCPReports
@@ -152,19 +174,21 @@ type trackRecvPair struct {
 
 // PeerConnection is a wrapper around webrtc.PeerConnection.
 type PeerConnection struct {
-	Net                   transport.Net
-	LocalRandomUDP        bool
-	ICEUDPMux             ice.UDPMux
-	ICETCPMux             *TCPMuxWrapper
-	ICEServers            []webrtc.ICEServer
-	IPsFromInterfaces     bool
-	IPsFromInterfacesList []string
-	AdditionalHosts       []string
-	STUNGatherTimeout     time.Duration
-	Publish               bool
-	OutboundTracks        []*OutboundTrack
-	OutboundDataChannels  []*OutboundDataChannel
-	Log                   logger.Writer
+	Net                          transport.Net
+	LocalRandomUDP               bool
+	ICEUDPMux                    ice.UDPMux
+	ICETCPMux                    *TCPMuxWrapper
+	ICEServers                   []webrtc.ICEServer
+	IPsFromInterfaces            bool
+	IPsFromInterfacesList        []string
+	IPsFromInterfacesExcludeList []string
+	AdditionalHosts              []string
+	STUNGatherTimeout            time.Duration
+	SupportsIPv6                 bool
+	Publish                      bool
+	OutboundTracks               []*OutboundTrack
+	OutboundDataChannels         []*OutboundDataChannel
+	Log                          logger.Writer
 
 	wr               *webrtc.PeerConnection
 	ctx              context.Context
@@ -198,13 +222,16 @@ func (co *PeerConnection) Start() error {
 	settingsEngine.SetIncludeLoopbackCandidate(true)
 
 	// always enable TCP since we might be the client of a remote TCP listener
-	networkTypes := []webrtc.NetworkType{
-		webrtc.NetworkTypeTCP4,
-		webrtc.NetworkTypeTCP6,
+	networkTypes := []webrtc.NetworkType{webrtc.NetworkTypeTCP4}
+	if co.SupportsIPv6 {
+		networkTypes = append(networkTypes, webrtc.NetworkTypeTCP6)
 	}
 
 	if co.LocalRandomUDP || co.ICEUDPMux != nil || len(co.ICEServers) != 0 {
-		networkTypes = append(networkTypes, webrtc.NetworkTypeUDP4, webrtc.NetworkTypeUDP6)
+		networkTypes = append(networkTypes, webrtc.NetworkTypeUDP4)
+		if co.SupportsIPv6 {
+			networkTypes = append(networkTypes, webrtc.NetworkTypeUDP6)
+		}
 	}
 
 	settingsEngine.SetNetworkTypes(networkTypes)
@@ -220,6 +247,12 @@ func (co *PeerConnection) Start() error {
 	settingsEngine.SetSTUNGatherTimeout(co.STUNGatherTimeout)
 
 	settingsEngine.SetNet(co.Net)
+
+	// Do not generate mDNS candidates and do not use mDNS candidates of remote peers.
+	// * they sometimes require a large CPU portion
+	// * they are not involved in any connectivity method mentioned in the documentation
+	// * they work in local networks only
+	settingsEngine.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 
 	mediaEngine := &webrtc.MediaEngine{}
 
@@ -266,10 +299,8 @@ func (co *PeerConnection) Start() error {
 		// Otherwise audio is muted on Firefox and Chrome.
 		if !videoSetupped {
 			err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
-				RTPCodecCapability: webrtc.RTPCodecCapability{
-					MimeType:  webrtc.MimeTypeVP8,
-					ClockRate: 90000,
-				},
+				MimeType:    webrtc.MimeTypeVP8,
+				ClockRate:   90000,
 				PayloadType: 96,
 			}, webrtc.RTPCodecTypeVideo)
 			if err != nil {
@@ -457,7 +488,7 @@ func (co *PeerConnection) removeUnwantedCandidates(firstMedia *sdp.MediaDescript
 	var allowedIPs []string
 	if co.IPsFromInterfaces {
 		var err error
-		allowedIPs, err = interfaceIPs(co.IPsFromInterfacesList)
+		allowedIPs, err = interfaceIPs(co.IPsFromInterfacesList, co.IPsFromInterfacesExcludeList)
 		if err != nil {
 			return err
 		}
@@ -504,7 +535,12 @@ func (co *PeerConnection) addAdditionalCandidates(firstMedia *sdp.MediaDescripti
 		} else {
 			tmp, err := net.LookupIP(host)
 			if err != nil {
-				return err
+				// The host can't be resolved server-side - e.g. in air-gapped
+				// networks without DNS, or with split-horizon / overlay DNS
+				// names that only resolve on the client. Skip it instead of
+				// failing the entire session, so the other entries still work.
+				co.Log.Log(logger.Warn, "cannot resolve additional host %q, skipping it: %v", host, err)
+				continue
 			}
 
 			ips = make([]string, len(tmp))
@@ -564,11 +600,18 @@ func (co *PeerConnection) addAdditionalCandidates(firstMedia *sdp.MediaDescripti
 
 func (co *PeerConnection) filterLocalDescription(desc *webrtc.SessionDescription) (*webrtc.SessionDescription, error) {
 	var psdp sdp.SessionDescription
-	psdp.Unmarshal([]byte(desc.SDP)) //nolint:errcheck
+	err := psdp.Unmarshal([]byte(desc.SDP))
+	if err != nil {
+		return nil, err
+	}
+
+	if len(psdp.MediaDescriptions) == 0 {
+		return nil, fmt.Errorf("local description has no media sections")
+	}
 
 	firstMedia := psdp.MediaDescriptions[0]
 
-	err := co.removeUnwantedCandidates(firstMedia)
+	err = co.removeUnwantedCandidates(firstMedia)
 	if err != nil {
 		return nil, err
 	}
@@ -762,31 +805,70 @@ func (co *PeerConnection) GatherInboundTracks(timeout time.Duration) error {
 	sdp.Unmarshal([]byte(co.wr.RemoteDescription().SDP)) //nolint:errcheck
 
 	maxTrackCount := maxTrackCount(sdp.MediaDescriptions)
+	tracks := make([]*InboundTrack, 0, maxTrackCount)
 
 	t := time.NewTimer(timeout)
 	defer t.Stop()
 
+	midIndexByMid := make(map[string]int, len(sdp.MediaDescriptions))
+	ridIndexByMid := make(map[string]map[string]int, len(sdp.MediaDescriptions))
+
+	for i, media := range sdp.MediaDescriptions {
+		mid, _ := media.Attribute("mid")
+		midIndexByMid[mid] = i
+		ridIndexByMid[mid] = ridIndexByMedia(media)
+	}
+
+	getMIDIndex := func(mid string) int {
+		if v, ok := midIndexByMid[mid]; ok {
+			return v
+		}
+
+		return len(midIndexByMid)
+	}
+
+	getRIDIndex := func(mid, rid string) int {
+		if rid == "" {
+			return 0
+		}
+
+		if v, ok := ridIndexByMid[mid][rid]; ok {
+			return v
+		}
+
+		return len(ridIndexByMid[mid])
+	}
+
+outer:
 	for {
 		select {
 		case <-t.C:
-			if len(co.inboundTracks) != 0 {
-				return nil
+			if len(tracks) != 0 {
+				break outer
 			}
 			return fmt.Errorf("deadline exceeded while waiting tracks")
 
 		case pair := <-co.inboundTrack:
-			t := &InboundTrack{
+			mid := ""
+			if transceiver := pair.receiver.RTPTransceiver(); transceiver != nil {
+				mid = transceiver.Mid()
+			}
+			rid := pair.track.RID()
+
+			track := &InboundTrack{
 				track:     pair.track,
 				receiver:  pair.receiver,
-				rid:       pair.track.RID(),
+				midIndex:  getMIDIndex(mid),
+				rid:       rid,
+				ridIndex:  getRIDIndex(mid, rid),
 				writeRTCP: co.wr.WriteRTCP,
 				log:       co.Log,
 			}
-			t.initialize()
-			co.inboundTracks = append(co.inboundTracks, t)
+			track.initialize()
+			tracks = append(tracks, track)
 
-			if len(co.inboundTracks) >= maxTrackCount {
-				return nil
+			if len(tracks) >= maxTrackCount {
+				break outer
 			}
 
 		case <-co.Failed():
@@ -796,6 +878,29 @@ func (co *PeerConnection) GatherInboundTracks(timeout time.Duration) error {
 			return fmt.Errorf("terminated")
 		}
 	}
+
+	slices.SortStableFunc(tracks, func(track1 *InboundTrack, track2 *InboundTrack) int {
+		if track1.midIndex != track2.midIndex {
+			return track1.midIndex - track2.midIndex
+		}
+
+		if track1.ridIndex != track2.ridIndex {
+			return track1.ridIndex - track2.ridIndex
+		}
+
+		id1 := track1.track.ID()
+		id2 := track2.track.ID()
+		if id1 != id2 {
+			return strings.Compare(id1, id2)
+		}
+
+		streamID1 := track1.track.StreamID()
+		streamID2 := track2.track.StreamID()
+		return strings.Compare(streamID1, streamID2)
+	})
+
+	co.inboundTracks = tracks
+	return nil
 }
 
 // Connected returns when connected.

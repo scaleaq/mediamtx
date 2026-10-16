@@ -1,4 +1,4 @@
-package packetdumper
+package packetdumper_test
 
 import (
 	"crypto/tls"
@@ -6,8 +6,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bluenviron/mediamtx/internal/test"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bluenviron/mediamtx/internal/packetdumper"
+	"github.com/bluenviron/mediamtx/internal/test"
 )
 
 func TestTLSListener(t *testing.T) {
@@ -21,12 +23,12 @@ func TestTLSListener(t *testing.T) {
 
 	prefix := filepath.Join(t.TempDir(), "capture")
 
-	pdLn := &Listener{
+	pdLn := &packetdumper.Listener{
 		Wrapped: innerLn,
 		Prefix:  prefix,
 	}
 
-	tlsLn := &TLSListener{
+	tlsLn := &packetdumper.TLSListener{
 		Wrapped:   pdLn,
 		TLSConfig: serverTLSConfig,
 	}

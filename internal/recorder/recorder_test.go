@@ -43,9 +43,10 @@ func TestRecorder(t *testing.T) {
 			Formats: []rtspformat.Format{&rtspformat.MPEG4Audio{
 				PayloadTyp: 96,
 				Config: &mpeg4audio.AudioSpecificConfig{
-					Type:         2,
-					SampleRate:   44100,
-					ChannelCount: 2,
+					Type:          2,
+					SampleRate:    44100,
+					ChannelConfig: 2,
+					ChannelCount:  2, //nolint:staticcheck
 				},
 				SizeLength:       13,
 				IndexLength:      3,
@@ -170,6 +171,7 @@ func TestRecorder(t *testing.T) {
 			n := 0
 
 			w := &Recorder{
+				location:        time.UTC,
 				PathFormat:      recordPath,
 				Format:          f,
 				PartDuration:    100 * time.Millisecond,
@@ -280,7 +282,7 @@ func TestRecorder(t *testing.T) {
 								Config: mpeg4audio.AudioSpecificConfig{
 									Type:          2,
 									SampleRate:    44100,
-									ChannelCount:  2,
+									ChannelCount:  2, //nolint:staticcheck
 									ChannelConfig: 2,
 								},
 							},
@@ -411,9 +413,10 @@ func TestRecorderFMP4NegativeInitialDTS(t *testing.T) {
 			Formats: []rtspformat.Format{&rtspformat.MPEG4Audio{
 				PayloadTyp: 96,
 				Config: &mpeg4audio.AudioSpecificConfig{
-					Type:         2,
-					SampleRate:   44100,
-					ChannelCount: 2,
+					Type:          2,
+					SampleRate:    44100,
+					ChannelConfig: 2,
+					ChannelCount:  2, //nolint:staticcheck
 				},
 				SizeLength:       13,
 				IndexLength:      3,
@@ -444,6 +447,7 @@ func TestRecorderFMP4NegativeInitialDTS(t *testing.T) {
 	recordPath := filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f")
 
 	w := &Recorder{
+		location:        time.UTC,
 		PathFormat:      recordPath,
 		Format:          conf.RecordFormatFMP4,
 		PartDuration:    100 * time.Millisecond,
@@ -504,9 +508,10 @@ func TestRecorderFMP4NegativeDTSDiff(t *testing.T) {
 			Formats: []rtspformat.Format{&rtspformat.MPEG4Audio{
 				PayloadTyp: 96,
 				Config: &mpeg4audio.AudioSpecificConfig{
-					Type:         2,
-					SampleRate:   44100,
-					ChannelCount: 2,
+					Type:          2,
+					SampleRate:    44100,
+					ChannelConfig: 2,
+					ChannelCount:  2, //nolint:staticcheck
 				},
 				SizeLength:       13,
 				IndexLength:      3,
@@ -537,6 +542,7 @@ func TestRecorderFMP4NegativeDTSDiff(t *testing.T) {
 	recordPath := filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f")
 
 	w := &Recorder{
+		location:        time.UTC,
 		PathFormat:      recordPath,
 		Format:          conf.RecordFormatFMP4,
 		PartDuration:    100 * time.Millisecond,
@@ -652,6 +658,7 @@ func TestRecorderSkipTracksPartial(t *testing.T) {
 			}
 
 			w := &Recorder{
+				location:        time.UTC,
 				PathFormat:      recordPath,
 				Format:          fo,
 				PartDuration:    100 * time.Millisecond,
@@ -718,6 +725,7 @@ func TestRecorderSkipTracksFull(t *testing.T) {
 			}
 
 			w := &Recorder{
+				location:        time.UTC,
 				PathFormat:      recordPath,
 				Format:          fo,
 				PartDuration:    100 * time.Millisecond,
@@ -769,6 +777,7 @@ func TestRecorderFMP4SegmentSwitch(t *testing.T) {
 	n := 0
 
 	w := &Recorder{
+		location:        time.UTC,
 		PathFormat:      filepath.Join(dir, "%path/%Y-%m-%d_%H-%M-%S-%f"),
 		Format:          conf.RecordFormatFMP4,
 		PartDuration:    100 * time.Millisecond,
@@ -863,9 +872,10 @@ func TestRecorderTimeDriftDetector(t *testing.T) {
 					Formats: []rtspformat.Format{&rtspformat.MPEG4Audio{
 						PayloadTyp: 96,
 						Config: &mpeg4audio.AudioSpecificConfig{
-							Type:         2,
-							SampleRate:   44100,
-							ChannelCount: 2,
+							Type:          2,
+							SampleRate:    44100,
+							ChannelConfig: 2,
+							ChannelCount:  2, //nolint:staticcheck
 						},
 						SizeLength:       13,
 						IndexLength:      3,
@@ -913,6 +923,7 @@ func TestRecorderTimeDriftDetector(t *testing.T) {
 			}
 
 			w := &Recorder{
+				location:        time.UTC,
 				PathFormat:      recordPath,
 				Format:          f,
 				PartDuration:    100 * time.Millisecond,

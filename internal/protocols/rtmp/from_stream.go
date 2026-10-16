@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bluenviron/gortmplib"
+	"github.com/bluenviron/gortmplib/pkg/amf0"
 	"github.com/bluenviron/gortmplib/pkg/codecs"
 	"github.com/bluenviron/gortmplib/pkg/message"
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
@@ -21,6 +22,7 @@ import (
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg1audio"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/opus"
+
 	"github.com/bluenviron/mediamtx/internal/formatlabel"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/stream"
@@ -46,14 +48,15 @@ func FromStream(
 	origDesc *description.Session,
 	outDesc *description.Session,
 	r *stream.Reader,
-	conn *gortmplib.ServerConn,
+	conn gortmplib.Conn,
 	nconn net.Conn,
 	writeTimeout time.Duration,
-) error {
+	fourCcList amf0.StrictArray,
+) (*gortmplib.Writer, error) {
 	var tracks []*gortmplib.Track
 	var w *gortmplib.Writer
 
-	isEnhanced := len(conn.FourCcList) != 0
+	isEnhanced := len(fourCcList) != 0
 	legacyVideoTrackCount := 0
 	legacyAudioTrackCount := 0
 
@@ -61,7 +64,7 @@ func FromStream(
 		for j, origFormat := range origMedia.Formats {
 			switch origFormat := origFormat.(type) {
 			case *format.AV1:
-				if slices.Contains(conn.FourCcList, any(fourCCToString(message.FourCCAV1))) {
+				if slices.Contains(fourCcList, any(fourCCToString(message.FourCCAV1))) {
 					track := &gortmplib.Track{
 						Codec: &codecs.AV1{},
 					}
@@ -84,7 +87,7 @@ func FromStream(
 				}
 
 			case *format.VP9:
-				if slices.Contains(conn.FourCcList, any(fourCCToString(message.FourCCVP9))) {
+				if slices.Contains(fourCcList, any(fourCCToString(message.FourCCVP9))) {
 					track := &gortmplib.Track{
 						Codec: &codecs.VP9{},
 					}
@@ -107,7 +110,7 @@ func FromStream(
 				}
 
 			case *format.H265:
-				if slices.Contains(conn.FourCcList, any(fourCCToString(message.FourCCHEVC))) {
+				if slices.Contains(fourCcList, any(fourCCToString(message.FourCCHEVC))) {
 					outFormat := outDesc.Medias[i].Formats[j].(*format.H265)
 
 					track := &gortmplib.Track{
@@ -216,7 +219,7 @@ func FromStream(
 				}
 
 			case *format.Opus:
-				if slices.Contains(conn.FourCcList, any(fourCCToString(message.FourCCOpus))) {
+				if slices.Contains(fourCcList, any(fourCCToString(message.FourCCOpus))) {
 					track := &gortmplib.Track{
 						Codec: &codecs.Opus{
 							IDHeader: &opus.IDHeader{
@@ -369,7 +372,7 @@ func FromStream(
 				}
 
 			case *format.AC3:
-				if slices.Contains(conn.FourCcList, any(fourCCToString(message.FourCCAC3))) {
+				if slices.Contains(fourCcList, any(fourCCToString(message.FourCCAC3))) {
 					track := &gortmplib.Track{
 						Codec: &codecs.AC3{
 							SampleRate:   origFormat.SampleRate,
@@ -467,16 +470,16 @@ func FromStream(
 
 			case *format.Generic:
 				if strings.HasPrefix(strings.ToLower(origFormat.RTPMap()), "flac/") &&
-					slices.Contains(conn.FourCcList, any(fourCCToString(message.FourCCFLAC))) {
+					slices.Contains(fourCcList, any(fourCCToString(message.FourCCFLAC))) {
 					enc, err := hex.DecodeString(origFormat.FMT["streaminfo"])
 					if err != nil {
-						return err
+						return nil, err
 					}
 
 					var streamInfo flac.StreamInfo
 					err = streamInfo.Unmarshal(enc)
 					if err != nil {
-						return err
+						return nil, err
 					}
 
 					track := &gortmplib.Track{
@@ -507,7 +510,7 @@ func FromStream(
 	}
 
 	if len(tracks) == 0 {
-		return errNoSupportedCodecsFrom
+		return nil, errNoSupportedCodecsFrom
 	}
 
 	w = &gortmplib.Writer{
@@ -516,7 +519,7 @@ func FromStream(
 	}
 	err := w.Initialize()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	setuppedFormats := r.Formats()
@@ -531,5 +534,5 @@ func FromStream(
 		}
 	}
 
-	return nil
+	return w, nil
 }

@@ -21,6 +21,7 @@ linters:
     - usestdlibvars
     - unconvert
     - tparallel
+    - thelper
     - wastedassign
     - whitespace
 
@@ -78,6 +79,11 @@ linters:
         - stringsbuilder
         - testingcontext
 
+    revive:
+      enable-default-rules: true
+      rules:
+        - name: redundant-import-alias
+
   exclusions:
     rules:
       - linters:
@@ -86,6 +92,14 @@ linters:
 
 formatters:
   enable:
+    - gci
     - gofmt
     - gofumpt
     - goimports
+
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - localmodule

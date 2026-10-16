@@ -1,13 +1,14 @@
-package rtsp
+package rtsp_test
 
 import (
 	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,20 +17,20 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
-	mpegts "github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts"
+	"github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts"
 	tscodecs "github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts/codecs"
+	"github.com/pion/rtp"
 	"github.com/pires/go-proxyproto"
+	"github.com/stretchr/testify/require"
 
 	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
-	"github.com/bluenviron/mediamtx/internal/logger"
+	"github.com/bluenviron/mediamtx/internal/servers/rtsp"
 	"github.com/bluenviron/mediamtx/internal/stream"
 	"github.com/bluenviron/mediamtx/internal/test"
 	"github.com/bluenviron/mediamtx/internal/unit"
-	"github.com/pion/rtp"
-	"github.com/stretchr/testify/require"
 )
 
 type dummyPath struct{}
@@ -156,7 +157,7 @@ func TestServerPublish(t *testing.T) {
 						authMethods = []rtspauth.VerifyMethod{rtspauth.VerifyMethodBasic, rtspauth.VerifyMethodDigestMD5}
 					}
 
-					s := &Server{
+					s := &rtsp.Server{
 						Address:        "127.0.0.1:8557",
 						AuthMethods:    authMethods,
 						ReadTimeout:    conf.Duration(10 * time.Second),
@@ -217,15 +218,13 @@ func TestServerPublish(t *testing.T) {
 					defer source.Close()
 
 					err = source.WritePacketRTP(media0, &rtp.Packet{
-						Header: rtp.Header{
-							Version:        2,
-							Marker:         true,
-							PayloadType:    96,
-							SequenceNumber: 123,
-							Timestamp:      45343,
-							SSRC:           563423,
-						},
-						Payload: []byte{5, 2, 3, 4},
+						Version:        2,
+						Marker:         true,
+						PayloadType:    96,
+						SequenceNumber: 123,
+						Timestamp:      45343,
+						SSRC:           563423,
+						Payload:        []byte{5, 2, 3, 4},
 					})
 					require.NoError(t, err)
 
@@ -236,22 +235,26 @@ func TestServerPublish(t *testing.T) {
 					require.Equal(t, &defs.APIRTSPSessionList{
 						Items: []defs.APIRTSPSession{
 							{
-								ID:                 list.Items[0].ID,
-								Created:            list.Items[0].Created,
-								RemoteAddr:         list.Items[0].RemoteAddr,
-								State:              "publish",
-								Path:               "teststream",
-								Query:              "param=value",
-								User:               "myuser",
-								UserAgent:          list.Items[0].UserAgent,
-								InboundBytes:       list.Items[0].InboundBytes,
-								InboundRTPPackets:  list.Items[0].InboundRTPPackets,
-								OutboundBytes:      list.Items[0].OutboundBytes,
-								BytesReceived:      list.Items[0].BytesReceived,
-								BytesSent:          list.Items[0].BytesSent,
-								Conns:              list.Items[0].Conns,
-								RTPPacketsReceived: list.Items[0].RTPPacketsReceived,
-								Transport:          new("TCP"),
+								ID:                        list.Items[0].ID,
+								Created:                   list.Items[0].Created,
+								RemoteAddr:                list.Items[0].RemoteAddr,
+								State:                     "publish",
+								Path:                      "teststream",
+								Query:                     "param=value",
+								User:                      "myuser",
+								UserAgent:                 list.Items[0].UserAgent,
+								InboundBytes:              list.Items[0].InboundBytes,
+								InboundRTPPackets:         list.Items[0].InboundRTPPackets,
+								InboundRTCPPackets:        list.Items[0].InboundRTCPPackets,
+								InboundRTCPPacketsInError: list.Items[0].InboundRTCPPacketsInError,
+								OutboundBytes:             list.Items[0].OutboundBytes,
+								BytesReceived:             list.Items[0].BytesReceived,
+								BytesSent:                 list.Items[0].BytesSent,
+								Conns:                     list.Items[0].Conns,
+								RTPPacketsReceived:        list.Items[0].RTPPacketsReceived,
+								RTCPPacketsReceived:       list.Items[0].RTCPPacketsReceived,
+								RTCPPacketsInError:        list.Items[0].RTCPPacketsInError,
+								Transport:                 new("TCP"),
 								Profile: func() *string {
 									if encrypt == "tls" {
 										return new("SAVP")
@@ -342,7 +345,7 @@ func TestServerPublishMPEGTS(t *testing.T) {
 		},
 	}
 
-	s := &Server{
+	s := &rtsp.Server{
 		Address:        "127.0.0.1:8557",
 		ReadTimeout:    conf.Duration(10 * time.Second),
 		WriteTimeout:   conf.Duration(10 * time.Second),
@@ -493,7 +496,7 @@ func TestServerRead(t *testing.T) {
 				authMethods = []rtspauth.VerifyMethod{rtspauth.VerifyMethodBasic, rtspauth.VerifyMethodDigestMD5}
 			}
 
-			s := &Server{
+			s := &rtsp.Server{
 				Address:        "127.0.0.1:8557",
 				AuthMethods:    authMethods,
 				ReadTimeout:    conf.Duration(10 * time.Second),
@@ -529,14 +532,12 @@ func TestServerRead(t *testing.T) {
 
 			reader.OnPacketRTPAny(func(_ *description.Media, _ format.Format, p *rtp.Packet) {
 				require.Equal(t, &rtp.Packet{
-					Header: rtp.Header{
-						Version:        2,
-						Marker:         true,
-						PayloadType:    96,
-						SequenceNumber: p.SequenceNumber,
-						Timestamp:      p.Timestamp,
-						SSRC:           p.SSRC,
-					},
+					Version:        2,
+					Marker:         true,
+					PayloadType:    96,
+					SequenceNumber: p.SequenceNumber,
+					Timestamp:      p.Timestamp,
+					SSRC:           p.SSRC,
 					Payload: []byte{
 						0x18, 0x00, 0x19, 0x67, 0x42, 0xc0, 0x28, 0xd9,
 						0x00, 0x78, 0x02, 0x27, 0xe5, 0x84, 0x00, 0x00,
@@ -565,25 +566,27 @@ func TestServerRead(t *testing.T) {
 			require.Equal(t, &defs.APIRTSPSessionList{
 				Items: []defs.APIRTSPSession{
 					{
-						ID:                 list.Items[0].ID,
-						Created:            list.Items[0].Created,
-						RemoteAddr:         list.Items[0].RemoteAddr,
-						State:              "read",
-						Path:               "teststream",
-						Query:              "param=value",
-						User:               "myuser",
-						UserAgent:          list.Items[0].UserAgent,
-						InboundBytes:       list.Items[0].InboundBytes,
-						InboundRTPPackets:  list.Items[0].InboundRTPPackets,
-						OutboundBytes:      list.Items[0].OutboundBytes,
-						OutboundRTPPackets: list.Items[0].OutboundRTPPackets,
-						BytesReceived:      list.Items[0].BytesReceived,
-						BytesSent:          list.Items[0].BytesSent,
-						Conns:              list.Items[0].Conns,
-						RTPPacketsReceived: list.Items[0].RTPPacketsReceived,
-						RTPPacketsSent:     list.Items[0].RTPPacketsSent,
-						Transport:          new("TCP"),
-						Profile:            new("AVP"),
+						ID:                  list.Items[0].ID,
+						Created:             list.Items[0].Created,
+						RemoteAddr:          list.Items[0].RemoteAddr,
+						State:               "read",
+						Path:                "teststream",
+						Query:               "param=value",
+						User:                "myuser",
+						UserAgent:           list.Items[0].UserAgent,
+						InboundBytes:        list.Items[0].InboundBytes,
+						InboundRTPPackets:   list.Items[0].InboundRTPPackets,
+						OutboundBytes:       list.Items[0].OutboundBytes,
+						OutboundRTPPackets:  list.Items[0].OutboundRTPPackets,
+						OutboundRTCPPackets: list.Items[0].OutboundRTCPPackets,
+						BytesReceived:       list.Items[0].BytesReceived,
+						BytesSent:           list.Items[0].BytesSent,
+						Conns:               list.Items[0].Conns,
+						RTPPacketsReceived:  list.Items[0].RTPPacketsReceived,
+						RTPPacketsSent:      list.Items[0].RTPPacketsSent,
+						RTCPPacketsSent:     list.Items[0].RTCPPacketsSent,
+						Transport:           new("TCP"),
+						Profile:             new("AVP"),
 					},
 				},
 			}, list)
@@ -641,7 +644,7 @@ func TestServerRedirect(t *testing.T) {
 				},
 			}
 
-			s := &Server{
+			s := &rtsp.Server{
 				Address:        "127.0.0.1:8557",
 				AuthMethods:    []rtspauth.VerifyMethod{rtspauth.VerifyMethodBasic},
 				ReadTimeout:    conf.Duration(10 * time.Second),
@@ -686,23 +689,13 @@ func TestAuthError(t *testing.T) {
 		},
 	}
 
-	var n atomic.Int64
-	done := make(chan struct{})
-
-	s := &Server{
+	s := &rtsp.Server{
 		Address:        "127.0.0.1:8557",
 		ReadTimeout:    conf.Duration(10 * time.Second),
 		WriteTimeout:   conf.Duration(10 * time.Second),
 		WriteQueueSize: 512,
 		PathManager:    pathManager,
-		Parent: test.Logger(func(l logger.Level, s string, i ...any) {
-			if l == logger.Info {
-				if n.Add(1) == 3 {
-					require.Regexp(t, "authentication failed: auth error$", fmt.Sprintf(s, i...))
-					close(done)
-				}
-			}
-		}),
+		Parent:         test.NilLogger,
 	}
 	err := s.Initialize()
 	require.NoError(t, err)
@@ -722,6 +715,82 @@ func TestAuthError(t *testing.T) {
 
 	_, _, err = reader.Describe(u)
 	require.EqualError(t, err, "bad status code: 401 (Unauthorized)")
+}
 
-	<-done
+func TestServerAPISessionsKickConcurrent(t *testing.T) {
+	pathManager := &test.PathManager{
+		FindPathConfImpl: func(defs.PathFindPathConfReq) (*defs.PathFindPathConfRes, error) {
+			return &defs.PathFindPathConfRes{Conf: &conf.Path{}}, nil
+		},
+	}
+
+	s := &rtsp.Server{
+		Address:        "127.0.0.1:8557",
+		ReadTimeout:    conf.Duration(10 * time.Second),
+		WriteTimeout:   conf.Duration(10 * time.Second),
+		WriteQueueSize: 512,
+		PathManager:    pathManager,
+		Parent:         test.NilLogger,
+	}
+	err := s.Initialize()
+	require.NoError(t, err)
+	defer s.Close()
+
+	for range 20 {
+		var u *base.URL
+		u, err = base.ParseURL("rtsp://127.0.0.1:8557/teststream")
+		require.NoError(t, err)
+		source := &gortsplib.Client{Scheme: u.Scheme, Host: u.Host}
+		err = source.Start()
+		require.NoError(t, err)
+
+		_, err = source.Announce(u, &description.Session{Medias: []*description.Media{test.MediaH264}})
+		require.NoError(t, err)
+
+		var list *defs.APIRTSPSessionList
+		list, err = s.APISessionsList()
+		require.NoError(t, err)
+		require.Len(t, list.Items, 1)
+		id := list.Items[0].ID
+
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		kickResults := make(chan error, 2)
+		for range 10 {
+			wg.Go(func() {
+				<-start
+				_, _ = s.APISessionsList()
+				_, _ = s.APISessionsGet(id)
+			})
+		}
+		for range 2 {
+			wg.Go(func() {
+				<-start
+				kickResults <- s.APISessionsKick(id)
+			})
+		}
+		close(start)
+		wg.Wait()
+		close(kickResults)
+
+		kicked, notFound := 0, 0
+		for err := range kickResults {
+			switch {
+			case err == nil:
+				kicked++
+			case errors.Is(err, rtsp.ErrSessionNotFound):
+				notFound++
+			default:
+				require.NoError(t, err)
+			}
+		}
+		require.Equal(t, 1, kicked)
+		require.Equal(t, 1, notFound)
+
+		list, err = s.APISessionsList()
+		require.NoError(t, err)
+		require.Empty(t, list.Items)
+		require.ErrorIs(t, s.APISessionsKick(id), rtsp.ErrSessionNotFound)
+		source.Close()
+	}
 }

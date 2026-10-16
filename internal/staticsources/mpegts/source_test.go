@@ -1,4 +1,4 @@
-package mpegts
+package mpegts_test
 
 import (
 	"bufio"
@@ -9,16 +9,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts"
+	mpegtslib "github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts"
 	tscodecs "github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts/codecs"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
+	"github.com/bluenviron/mediamtx/internal/staticsources/mpegts"
 	"github.com/bluenviron/mediamtx/internal/test"
 )
 
 func multicastCapableInterface(t *testing.T) string {
+	t.Helper()
+
 	intfs, err := net.Interfaces()
 	require.NoError(t, err)
 
@@ -60,7 +63,7 @@ func TestSourceUDP(t *testing.T) {
 			p.Initialize()
 			defer p.Close()
 
-			so := &Source{
+			so := &mpegts.Source{
 				ReadTimeout: conf.Duration(10 * time.Second),
 				Parent:      p,
 			}
@@ -114,12 +117,12 @@ func TestSourceUDP(t *testing.T) {
 			require.NoError(t, err)
 			defer conn.Close() //nolint:errcheck
 
-			track := &mpegts.Track{
+			track := &mpegtslib.Track{
 				Codec: &tscodecs.H264{},
 			}
 
 			bw := bufio.NewWriter(conn)
-			w := &mpegts.Writer{W: bw, Tracks: []*mpegts.Track{track}}
+			w := &mpegtslib.Writer{W: bw, Tracks: []*mpegtslib.Track{track}}
 			err = w.Initialize()
 			require.NoError(t, err)
 
@@ -140,6 +143,8 @@ func TestSourceUDP(t *testing.T) {
 			require.NoError(t, err)
 
 			<-p.Unit
+
+			require.Equal(t, defs.StaticSourceInfo{}, so.Info())
 
 			// the source must be listening on ReloadConf
 			reloadConf <- nil
@@ -165,7 +170,7 @@ func TestSourceUnixSocket(t *testing.T) {
 				p.Initialize()
 				defer p.Close()
 
-				so := &Source{
+				so := &mpegts.Source{
 					ReadTimeout: conf.Duration(10 * time.Second),
 					Parent:      p,
 				}
@@ -193,12 +198,12 @@ func TestSourceUnixSocket(t *testing.T) {
 				conn, err := net.Dial("unix", pa)
 				require.NoError(t, err)
 
-				track := &mpegts.Track{
+				track := &mpegtslib.Track{
 					Codec: &tscodecs.H264{},
 				}
 
 				bw := bufio.NewWriter(conn)
-				w := &mpegts.Writer{W: bw, Tracks: []*mpegts.Track{track}}
+				w := &mpegtslib.Writer{W: bw, Tracks: []*mpegtslib.Track{track}}
 				err = w.Initialize()
 				require.NoError(t, err)
 

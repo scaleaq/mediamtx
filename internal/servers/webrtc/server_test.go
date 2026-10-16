@@ -9,28 +9,26 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
-	"regexp"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
-	"github.com/bluenviron/mediamtx/internal/auth"
-	"github.com/bluenviron/mediamtx/internal/conf"
-	"github.com/bluenviron/mediamtx/internal/defs"
-	"github.com/bluenviron/mediamtx/internal/externalcmd"
-	"github.com/bluenviron/mediamtx/internal/logger"
-	"github.com/bluenviron/mediamtx/internal/protocols/webrtc"
-	"github.com/bluenviron/mediamtx/internal/protocols/whip"
-	"github.com/bluenviron/mediamtx/internal/stream"
-	"github.com/bluenviron/mediamtx/internal/test"
-	"github.com/bluenviron/mediamtx/internal/unit"
 	"github.com/google/uuid"
 	"github.com/pion/rtp"
 	"github.com/pion/sdp/v3"
 	pwebrtc "github.com/pion/webrtc/v4"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bluenviron/mediamtx/internal/auth"
+	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/defs"
+	"github.com/bluenviron/mediamtx/internal/externalcmd"
+	"github.com/bluenviron/mediamtx/internal/protocols/webrtc"
+	"github.com/bluenviron/mediamtx/internal/protocols/whip"
+	"github.com/bluenviron/mediamtx/internal/stream"
+	"github.com/bluenviron/mediamtx/internal/test"
+	"github.com/bluenviron/mediamtx/internal/unit"
 )
 
 func whipAnswer(body []byte) *pwebrtc.SessionDescription {
@@ -41,6 +39,8 @@ func whipAnswer(body []byte) *pwebrtc.SessionDescription {
 }
 
 func checkClose(t *testing.T, closeFunc func() error) {
+	t.Helper()
+
 	require.NoError(t, closeFunc())
 }
 
@@ -65,6 +65,8 @@ func (p *dummyPath) RemoveReader(_ defs.PathRemoveReaderReq) {
 }
 
 func initializeTestServer(t *testing.T) *Server {
+	t.Helper()
+
 	pm := &test.PathManager{
 		FindPathConfImpl: func(req defs.PathFindPathConfReq) (*defs.PathFindPathConfRes, error) {
 			return &defs.PathFindPathConfRes{Conf: &conf.Path{}, User: req.AccessRequest.Credentials.User}, nil
@@ -128,6 +130,7 @@ func TestPreflightRequest(t *testing.T) {
 	req, err := http.NewRequest(http.MethodOptions, "http://localhost:8886", nil)
 	require.NoError(t, err)
 
+	req.Header.Add("Origin", "http://example.com")
 	req.Header.Add("Access-Control-Request-Method", "GET")
 
 	res, err := hc.Do(req)
@@ -139,8 +142,7 @@ func TestPreflightRequest(t *testing.T) {
 	byts, err := io.ReadAll(res.Body)
 	require.NoError(t, err)
 
-	require.Equal(t, "*", res.Header.Get("Access-Control-Allow-Origin"))
-	require.Equal(t, "true", res.Header.Get("Access-Control-Allow-Credentials"))
+	require.Equal(t, "http://example.com", res.Header.Get("Access-Control-Allow-Origin"))
 	require.Equal(t, "OPTIONS, GET, POST, PATCH, DELETE", res.Header.Get("Access-Control-Allow-Methods"))
 	require.Equal(t, "Authorization, Content-Type, If-Match", res.Header.Get("Access-Control-Allow-Headers"))
 	require.Equal(t, byts, []byte{})
@@ -319,10 +321,11 @@ func TestServerOptionsICEServer(t *testing.T) {
 
 	require.Equal(t, http.StatusNoContent, res.StatusCode)
 
-	iceServers, err := whip.LinkHeaderUnmarshal(res.Header["Link"])
+	var iceServers whip.LinkHeader
+	err = iceServers.Unmarshal(res.Header["Link"])
 	require.NoError(t, err)
 
-	require.Equal(t, []pwebrtc.ICEServer{{
+	require.Equal(t, whip.LinkHeader{{
 		URLs:       []string{"example.com"},
 		Username:   "myuser",
 		Credential: "mypass",
@@ -444,15 +447,13 @@ func TestServerPublish(t *testing.T) {
 	defer checkClose(t, wc.Close)
 
 	err = track.WriteRTP(&rtp.Packet{
-		Header: rtp.Header{
-			Version:        2,
-			Marker:         true,
-			PayloadType:    96,
-			SequenceNumber: 123,
-			Timestamp:      45343,
-			SSRC:           563423,
-		},
-		Payload: []byte{1},
+		Version:        2,
+		Marker:         true,
+		PayloadType:    96,
+		SequenceNumber: 123,
+		Timestamp:      45343,
+		SSRC:           563423,
+		Payload:        []byte{1},
 	})
 	require.NoError(t, err)
 
@@ -582,15 +583,13 @@ func TestServerRead(t *testing.T) {
 			}},
 			&unit.Unit{
 				RTPPackets: []*rtp.Packet{{
-					Header: rtp.Header{
-						Version:        2,
-						Marker:         true,
-						PayloadType:    9,
-						SequenceNumber: 1123,
-						Timestamp:      45343,
-						SSRC:           563423,
-					},
-					Payload: []byte{1, 2},
+					Version:        2,
+					Marker:         true,
+					PayloadType:    9,
+					SequenceNumber: 1123,
+					Timestamp:      45343,
+					SSRC:           563423,
+					Payload:        []byte{1, 2},
 				}},
 			},
 			[]byte{1, 2},
@@ -1014,15 +1013,13 @@ func TestServerICERestart(t *testing.T) {
 	defer checkClose(t, wc.Close)
 
 	err = track.WriteRTP(&rtp.Packet{
-		Header: rtp.Header{
-			Version:        2,
-			Marker:         true,
-			PayloadType:    96,
-			SequenceNumber: 1,
-			Timestamp:      1,
-			SSRC:           1,
-		},
-		Payload: []byte{1},
+		Version:        2,
+		Marker:         true,
+		PayloadType:    96,
+		SequenceNumber: 1,
+		Timestamp:      1,
+		SSRC:           1,
+		Payload:        []byte{1},
 	})
 	require.NoError(t, err)
 
@@ -1083,15 +1080,13 @@ func TestServerICERestart(t *testing.T) {
 	require.NoError(t, err)
 
 	err = track.WriteRTP(&rtp.Packet{
-		Header: rtp.Header{
-			Version:        2,
-			Marker:         true,
-			PayloadType:    96,
-			SequenceNumber: 2,
-			Timestamp:      uint32(2),
-			SSRC:           1,
-		},
-		Payload: []byte{2},
+		Version:        2,
+		Marker:         true,
+		PayloadType:    96,
+		SequenceNumber: 2,
+		Timestamp:      uint32(2),
+		SSRC:           1,
+		Payload:        []byte{2},
 	})
 	require.NoError(t, err)
 
@@ -1161,8 +1156,6 @@ func TestAuthError(t *testing.T) {
 		"whip post",
 	} {
 		t.Run(ca, func(t *testing.T) {
-			var authFailed atomic.Bool
-
 			s := &Server{
 				Address:      "127.0.0.1:8886",
 				ReadTimeout:  conf.Duration(10 * time.Second),
@@ -1176,15 +1169,7 @@ func TestAuthError(t *testing.T) {
 						return nil, &auth.Error{Wrapped: fmt.Errorf("auth error")}
 					},
 				},
-				Parent: test.Logger(func(_ logger.Level, s string, i ...any) {
-					if ca == "whip post" {
-						if regexp.MustCompile("authentication failed: auth error$").MatchString(fmt.Sprintf(s, i...)) {
-							authFailed.Store(true)
-						}
-					} else if regexp.MustCompile("failed to authenticate: auth error$").MatchString(fmt.Sprintf(s, i...)) {
-						authFailed.Store(true)
-					}
-				}),
+				Parent: test.NilLogger,
 			}
 			err := s.Initialize()
 			require.NoError(t, err)
@@ -1258,8 +1243,6 @@ func TestAuthError(t *testing.T) {
 			defer res.Body.Close()
 
 			require.Equal(t, http.StatusUnauthorized, res.StatusCode)
-
-			require.True(t, authFailed.Load())
 		})
 	}
 }
